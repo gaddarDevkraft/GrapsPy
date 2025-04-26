@@ -1,28 +1,14 @@
-from typing import Union
-from fastapi import FastAPI, status, APIRouter, Depends
-from app.config.database import engine, SessionLocal
-import app.models.TestingModel as testing_model
-import app.crud_operation.crud as crud
+from fastapi import FastAPI
+from app.config.database import engine
+import app.models.blog_model as model
+from app.route import blog_route
 
 app = FastAPI()
 
-testing_model.Base.metadata.create_all(bind = engine)
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+model.BASE.metadata.create_all(bind = engine)
 
 
-@app.get("/")
-def api():
-    return {"status": "running.."}
-
-@app.post("/create_model")
-def create_testing(name : str, email : str, db : SessionLocal = Depends(get_db)):
-    return crud.create_testing_model(db, name, email)
+app.include_router(blog_route.router)
 
 
 
