@@ -31,3 +31,12 @@ def update_blog(id: int, blog_request: blog_model.BlogModel, db: Session):
     return blog_to_update
 
 
+def delete_blog(id: int, db: Session):
+    blog_to_delete = db.query(blog_model.BlogModel).filter(blog_model.BlogModel.id == id).first()
+
+    if not blog_to_delete:
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Blog with id {id} not found")
+
+    db.delete(blog_to_delete)
+    db.commit()
+    return {"message": "Blog deleted successfully"}
