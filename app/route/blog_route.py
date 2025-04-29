@@ -21,3 +21,7 @@ def get_all_blogs(db: Session = Depends(get_db)):
 @router.put("/update/{id}")
 def update_blog(id : int, request_blog : blog_schema.BlogRequest, db: Session = Depends(get_db)):
     return blog_repo.update_blog(id, blog_model.BlogModel(title=request_blog.title, body=request_blog.content), db)
+
+@router.delete("/delete/{id}")
+def delete_blog(id : int, db: Session = Depends(get_db)):
+    return blog_repo.delete_blog(id, db)
