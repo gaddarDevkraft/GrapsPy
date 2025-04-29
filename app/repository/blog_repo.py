@@ -1,5 +1,4 @@
 from starlette.exceptions import HTTPException
-
 from app.models import blog_model
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
