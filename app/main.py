@@ -1,102 +1,128 @@
-from typing import Union
-#from dotenv import load_dotenv
-from fastapi import FastAPI, status, HTTPException
-#from openai import OpenAI
 import os
-# from langchain.document_loaders import DirectoryLoader
-from langchain_community.document_loaders import DirectoryLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import Document
-# from langchain.embeddings import OpenAIEmbeddings
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
-import openai
-from dotenv import load_dotenv
+import uuid
 import shutil
+from typing import List, Optional
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
+from fastapi.responses import JSONResponse
+import uvicorn
+from langchain_community.vectorstores import FAISS
+from langchain.chains import RetrievalQA
+from app.services import rag_service
+from app.model.query_responce import QueryResponse
+from app.model.query_request import QueryRequest
+from app.services.rag_service import embeddings
+
+document_store = {}
+
+app = FastAPI(title="RAG Document QA System")
 
 
-load_dotenv()
-
-app = FastAPI()
-
-#client = OpenAI(api_key=os.environ.get("DEVKRAFT_OPENAI_API_KEY"))
-
-openai.api_key = os.environ.get("OPENAI_API_KEY")
-
-CHROMA_PATH = "chroma"
-DATA_PATH = "app/data"
-
-
-def main():
-    generate_data_store()
-
-
-def generate_data_store():
-    documents = load_documents()
-    chunks = split_text(documents)
-    save_to_chroma(chunks)
-
-
-def load_documents():
+@app.post("/upload", response_class=JSONResponse)
+async def upload_document(file: UploadFile = File(...), document_name: Optional[str] = Form(None)):
     try:
-        loader = DirectoryLoader(DATA_PATH, glob="*.md")
-        documents = loader.load()
-        return documents
-    except FileNotFoundError as exception:
-        print(f"Error loading documents: {exception}")
-        return exception
+        doc_id = str(uuid.uuid4())
+        if document_name is None:
+            document_name = file.filename
+
+        file_path = f"uploaded_docs/{doc_id}_{file.filename}"
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        # Process the document
+        try:
+            document_chunks = rag_service.process_file(file_path)
+
+            # Store document metadata
+            document_store[doc_id] = {
+                "id": doc_id,
+                "name": document_name,
+                "filename": file.filename,
+                "path": file_path,
+                "chunk_count": len(document_chunks)
+            }
+
+            # Update vector store
+            rag_service.update_vector_store(document_chunks)
+
+            return {
+                "status": "success",
+                "message": f"Document '{document_name}' uploaded and processed successfully",
+                "document_id": doc_id,
+                "chunks_processed": len(document_chunks)
+            }
+
+        except Exception as e:
+            # Clean up on error
+            if os.path.exists(file_path):
+                os.remove(file_path)
+            raise HTTPException(status_code=400, detail=f"Error processing document: {str(e)}")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
 
-def split_text(documents: list[Document]):
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=300,
-        chunk_overlap=100,
-        length_function=len,
-        add_start_index=True,
-    )
-    chunks = text_splitter.split_documents(documents)
-    print(f"Split {len(documents)} documents into {len(chunks)} chunks.")
-
-    document = chunks[10]
-    print(document.page_content)
-    print(document.metadata)
-
-    return chunks
+# @app.get("/documents", response_class=JSONResponse)
+# async def list_documents():
+#     return {"documents": list(document_store.values())}
 
 
-def save_to_chroma(chunks: list[Document]):
-    # Clear out the database first.
-    if os.path.exists(CHROMA_PATH):
-        shutil.rmtree(CHROMA_PATH)
+@app.post("/query", response_model=QueryResponse)
+async def query_documents(request: QueryRequest):
+    if rag_service.vector_store is None:
+        print("Vector store is not initialized yet")
+        raise HTTPException(status_code=400, detail="No documents have been uploaded yet")
 
-    # Create a new DB from the documents.
-    db = Chroma.from_documents(
-        chunks, OpenAIEmbeddings(), persist_directory=CHROMA_PATH
-    )
-    db.persist()
-    print(f"Saved {len(chunks)} chunks to {CHROMA_PATH}.")
+    try:
+        result = rag_service.qa_chain({"query": request.query})
+
+        source_docs = []
+        if "source_documents" in result:
+            for doc in result["source_documents"]:
+                source_docs.append(doc.page_content[:200] + "...")  # First 200 chars of each source
+
+        return {
+            "answer": result["result"],
+            "source_documents": source_docs
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {str(e)}")
 
 
-
-
-# @app.get("/chat")
-# def get_chatbot_response(q: str):
+# @app.delete("/documents/{doc_id}", response_class=JSONResponse)
+# async def delete_document(doc_id: str):
+#     if doc_id not in document_store:
+#         raise HTTPException(status_code=404, detail="Document not found")
+#
 #     try:
-#         completion = client.chat.completions.create(
-#             model="gpt-3.5-turbo",
-#             messages=[
-#                 {
-#                     "role": "user", "content": q
-#                 }
-#             ]
-#         )
-#         return {"response": completion.choices[0].message.content}
+#         file_path = document_store[doc_id]["path"]
+#         if os.path.exists(file_path):
+#             os.remove(file_path)
+#
+#         del document_store[doc_id]
+#
+#
+#         return {"status": "success", "message": f"Document {doc_id} deleted successfully"}
+#
 #     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
+#         raise HTTPException(status_code=500, detail=f"Delete failed: {str(e)}")
 
-# import uvicorn
-# if __name__ == "__main__":
-#     uvicorn.run(app, host = "0.0.0.0", port = 8000)
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize components on startup if vector DB exists."""
+    if os.path.exists("vector_db/faiss_index"):
+
+        vector_store = FAISS.load_local("vector_db/faiss_index", embeddings)
+
+        # Initialize QA chain
+        llm = rag_service.init_llm()
+        rag_service.qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=vector_store.as_retriever(search_kwargs={"k": 3})
+        )
+
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
